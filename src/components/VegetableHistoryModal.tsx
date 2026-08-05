@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { VegetablePrice, VegetableHistoryReport, Language } from '../types';
+import { generateHistoryForVegetable } from '../data/vegetablesData';
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, AreaChart, Area } from 'recharts';
 import { X, Calendar, Download, Printer, TrendingDown, Sparkles, Activity, FileSpreadsheet, Layers } from 'lucide-react';
 
@@ -22,30 +23,60 @@ export const VegetableHistoryModal: React.FC<VegetableHistoryModalProps> = ({
   const [report, setReport] = useState<VegetableHistoryReport | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
-  // Fetch history report from server API
+  const currentVeg = vegetables.find((v) => v.id === selectedVegId) || vegetables[0];
+
+  // Fetch history report from server API with graceful fallback
   useEffect(() => {
     let isMounted = true;
     setLoading(true);
 
     fetch(`/api/prices/history?item=${selectedVegId}&days=${days}`)
-      .then((res) => res.json())
+      .then(async (res) => {
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        return res.json();
+      })
       .then((data) => {
         if (isMounted) {
-          setReport(data);
+          if (data && data.history && Array.isArray(data.history) && data.history.length > 0) {
+            setReport(data);
+          } else {
+            throw new Error('Invalid report format received from server');
+          }
           setLoading(false);
         }
       })
       .catch((err) => {
-        console.error('Failed to fetch vegetable history report:', err);
-        if (isMounted) setLoading(false);
+        console.warn('Backend history fetch failed, using local historical model fallback:', err);
+        if (isMounted) {
+          const fallbackHistory = generateHistoryForVegetable(currentVeg, days);
+          const avg30 = Math.round(fallbackHistory.reduce((acc, h) => acc + h.wholesaleAvg, 0) / (fallbackHistory.length || 1));
+          const min30 = Math.min(...fallbackHistory.map((h) => h.wholesaleMin));
+          const max30 = Math.max(...fallbackHistory.map((h) => h.wholesaleMax));
+          
+          setReport({
+            vegetable: currentVeg,
+            days,
+            history: fallbackHistory,
+            dataSource: 'Dambulla DEC Historical Model (Offline Fallback)',
+            isRealData: false,
+            stat7DayAvg: Math.round(fallbackHistory.slice(-7).reduce((a, b) => a + b.wholesaleAvg, 0) / Math.min(7, fallbackHistory.length || 1)),
+            stat30DayAvg: avg30,
+            stat30DayMin: min30,
+            stat30DayMax: max30,
+            volatilityRating: 'Moderate',
+            aiForecast: 'Price stability maintained with balanced supply & demand at Dambulla DEC.',
+            aiForecastSi: 'දඹුල්ල ආර්ථික මධ්‍යස්ථානයේ සැපයුම සහ ඉල්ලුම සමතුලිතව පවතින බැවින් මිල ස්ථාවරයි.'
+          });
+          setLoading(false);
+        }
       });
 
     return () => {
       isMounted = false;
     };
-  }, [selectedVegId, days]);
-
-  const currentVeg = vegetables.find((v) => v.id === selectedVegId) || vegetables[0];
+  }, [selectedVegId, days, currentVeg]);
 
   // CSV Export
   const handleExportCSV = () => {

@@ -215,48 +215,59 @@ async function syncLivePricesFromDambullaDec() {
   const entries = Object.entries(DAMBULLA_PRODUCT_MAP);
   let updatedCount = 0;
 
-  await Promise.all(
-    entries.map(async ([vegId, pId]) => {
-      try {
-        const response = await fetch(`https://api.dambulladec.com/api/prices/product/${pId}/chart`, {
-          headers: { 'User-Agent': 'DambullaDECPriceTracker/1.0' }
-        });
-        if (response.ok) {
-          const rawData = await response.json();
-          if (Array.isArray(rawData) && rawData.length > 0) {
-            const latest = rawData[rawData.length - 1];
-            const prev = rawData.length > 1 ? rawData[rawData.length - 2] : latest;
+  // Process in small batches to avoid socket exhaustion/timeouts on serverless
+  const batchSize = 6;
+  for (let i = 0; i < entries.length; i += batchSize) {
+    const batch = entries.slice(i, i + batchSize);
+    await Promise.all(
+      batch.map(async ([vegId, pId]) => {
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 1500);
 
-            const idx = currentVegetables.findIndex(v => v.id === vegId);
-            if (idx !== -1) {
-              const min = latest.min_price || currentVegetables[idx].wholesaleMin;
-              const max = latest.max_price || currentVegetables[idx].wholesaleMax;
-              const avg = Math.round((min + max) / 2);
+          const response = await fetch(`https://api.dambulladec.com/api/prices/product/${pId}/chart`, {
+            headers: { 'User-Agent': 'DambullaDECPriceTracker/1.0' },
+            signal: controller.signal
+          });
+          clearTimeout(timer);
 
-              const prevAvg = prev ? Math.round(((prev.min_price || min) + (prev.max_price || max)) / 2) : avg;
-              const changePct = prevAvg > 0 ? Number((((avg - prevAvg) / prevAvg) * 100).toFixed(2)) : 0;
+          if (response.ok) {
+            const rawData = await response.json();
+            if (Array.isArray(rawData) && rawData.length > 0) {
+              const latest = rawData[rawData.length - 1];
+              const prev = rawData.length > 1 ? rawData[rawData.length - 2] : latest;
 
-              currentVegetables[idx] = {
-                ...currentVegetables[idx],
-                dambullaProductId: pId,
-                wholesaleMin: min,
-                wholesaleMax: max,
-                wholesaleAvg: avg,
-                retailEst: Math.round(avg * 1.35),
-                previousAvg: prevAvg,
-                changePercent: changePct,
-                trend: changePct > 1 ? 'up' : changePct < -1 ? 'down' : 'stable',
-                lastUpdated: `Live from Dambulla DEC (${latest.date})`
-              };
-              updatedCount++;
+              const idx = currentVegetables.findIndex(v => v.id === vegId);
+              if (idx !== -1) {
+                const min = Number(latest.min_price) || currentVegetables[idx].wholesaleMin;
+                const max = Number(latest.max_price) || currentVegetables[idx].wholesaleMax;
+                const avg = Math.round((min + max) / 2);
+
+                const prevAvg = prev ? Math.round(((Number(prev.min_price) || min) + (Number(prev.max_price) || max)) / 2) : avg;
+                const changePct = prevAvg > 0 ? Number((((avg - prevAvg) / prevAvg) * 100).toFixed(2)) : 0;
+
+                currentVegetables[idx] = {
+                  ...currentVegetables[idx],
+                  dambullaProductId: pId,
+                  wholesaleMin: min,
+                  wholesaleMax: max,
+                  wholesaleAvg: avg,
+                  retailEst: Math.round(avg * 1.35),
+                  previousAvg: prevAvg,
+                  changePercent: changePct,
+                  trend: changePct > 1 ? 'up' : changePct < -1 ? 'down' : 'stable',
+                  lastUpdated: `Live from Dambulla DEC (${latest.date})`
+                };
+                updatedCount++;
+              }
             }
           }
+        } catch {
+          // Silently preserve existing data on fetch error/timeout
         }
-      } catch (err) {
-        // Silently preserve existing data on fetch error
-      }
-    })
-  );
+      })
+    );
+  }
 
   if (updatedCount > 0) {
     lastUpdatedTime = new Date().toISOString();
@@ -268,11 +279,8 @@ async function syncLivePricesFromDambullaDec() {
 const app = express();
 app.use(express.json());
 
-// Remove blocking middleware for serverless performance
-// Routes handle single-item live fetch on demand with timeout protection
-
 // 1. Live Daily Prices API
-app.get('/api/prices/today', async (req, res) => {
+app.get(['/api/prices/today', '/prices/today'], async (req, res) => {
   try {
     const refresh = req.query.refresh === 'true';
     if (refresh) {
@@ -298,7 +306,7 @@ app.get('/api/prices/today', async (req, res) => {
 });
 
 // 2. Vegetable History API
-app.get('/api/prices/history', async (req, res) => {
+app.get(['/api/prices/history', '/prices/history'], async (req, res) => {
   try {
     const vegId = (req.query.item as string) || 'carrot';
     const days = parseInt((req.query.days as string) || '30', 10);
@@ -312,7 +320,7 @@ app.get('/api/prices/history', async (req, res) => {
     if (dambullaId) {
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 4000);
+        const timeoutId = setTimeout(() => controller.abort(), 1500);
 
         const response = await fetch(`https://api.dambulladec.com/api/prices/product/${dambullaId}/chart`, {
           headers: { 'User-Agent': 'DambullaDECPriceTracker/1.0' },
@@ -343,7 +351,7 @@ app.get('/api/prices/history', async (req, res) => {
           }
         }
       } catch (err) {
-        console.error(`Error fetching real Dambulla DEC history for product ${dambullaId}:`, err);
+        console.warn(`Real Dambulla DEC fetch timed out or failed for product ${dambullaId}, using model fallback.`);
       }
     }
 
@@ -405,7 +413,7 @@ app.get('/api/prices/history', async (req, res) => {
 });
 
 // 3. FitSMS Gateway Endpoints
-app.get('/api/notifications/fitsms/config', (req, res) => {
+app.get(['/api/notifications/fitsms/config', '/notifications/fitsms/config'], (req, res) => {
   res.json({
     config: fitSMSConfig,
     maskedToken: fitSMSConfig.apiToken ? `${fitSMSConfig.apiToken.substring(0, 8)}...${fitSMSConfig.apiToken.slice(-4)}` : 'Not set',
@@ -416,7 +424,7 @@ app.get('/api/notifications/fitsms/config', (req, res) => {
   });
 });
 
-app.post('/api/notifications/fitsms/config', (req, res) => {
+app.post(['/api/notifications/fitsms/config', '/notifications/fitsms/config'], (req, res) => {
   const { apiToken, endpointMode, senderId } = req.body;
   if (apiToken) fitSMSConfig.apiToken = apiToken;
   if (endpointMode && (endpointMode === 'v4' || endpointMode === 'http')) fitSMSConfig.endpointMode = endpointMode;
@@ -430,7 +438,7 @@ app.post('/api/notifications/fitsms/config', (req, res) => {
   });
 });
 
-app.post('/api/notifications/fitsms/send', async (req, res) => {
+app.post(['/api/notifications/fitsms/send', '/notifications/fitsms/send'], async (req, res) => {
   const { recipient, message, apiToken, senderId } = req.body;
   if (!recipient || !message) {
     return res.status(400).json({ error: 'Recipient and message are required' });
@@ -459,11 +467,11 @@ app.post('/api/notifications/fitsms/send', async (req, res) => {
   });
 });
 
-app.get('/api/notifications/sms/rules', (req, res) => {
+app.get(['/api/notifications/sms/rules', '/notifications/sms/rules'], (req, res) => {
   res.json({ rules: smsRules, logs: smsLogs, fitSMSConfig });
 });
 
-app.post('/api/notifications/sms/rules', (req, res) => {
+app.post(['/api/notifications/sms/rules', '/notifications/sms/rules'], (req, res) => {
   const { phone, vegetableId, triggerType, targetPrice, percentageDrop, provider, language } = req.body;
   
   const veg = currentVegetables.find(v => v.id === vegetableId);
@@ -491,13 +499,13 @@ app.post('/api/notifications/sms/rules', (req, res) => {
   res.json({ success: true, rule: newRule });
 });
 
-app.delete('/api/notifications/sms/rules/:id', (req, res) => {
+app.delete(['/api/notifications/sms/rules/:id', '/notifications/sms/rules/:id'], (req, res) => {
   const { id } = req.params;
   smsRules = smsRules.filter(r => r.id !== id);
   res.json({ success: true, id });
 });
 
-app.post('/api/notifications/sms/test', async (req, res) => {
+app.post(['/api/notifications/sms/test', '/notifications/sms/test'], async (req, res) => {
   const { ruleId, customPhone, customMessage } = req.body;
   const rule = smsRules.find(r => r.id === ruleId) || smsRules[0];
   const veg = currentVegetables.find(v => v.id === rule?.vegetableId) || currentVegetables[0];
@@ -555,7 +563,7 @@ app.post('/api/notifications/sms/test', async (req, res) => {
 });
 
 // 4. AI Market Summary Endpoint using Gemini API
-app.get('/api/ai/market-summary', async (req, res) => {
+app.get(['/api/ai/market-summary', '/ai/market-summary'], async (req, res) => {
   const ai = getGeminiClient();
   
   const sortedByDrop = [...currentVegetables].sort((a, b) => a.changePercent - b.changePercent);
