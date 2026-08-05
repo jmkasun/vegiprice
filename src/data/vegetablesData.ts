@@ -749,17 +749,36 @@ export const INITIAL_VEGETABLES: VegetablePrice[] = [
 ];
 
 // Helper to generate realistic 30-day history for a vegetable
-export function generateHistoryForVegetable(veg: VegetablePrice, days: number = 30): PriceHistoryPoint[] {
+export function generateHistoryForVegetable(veg?: VegetablePrice, days: number = 30): PriceHistoryPoint[] {
+  const safeVeg = veg || INITIAL_VEGETABLES[0] || {
+    id: 'carrot',
+    nameEn: 'Carrot',
+    nameSi: 'කැරට්',
+    nameTa: 'கேரட்',
+    category: 'Upcountry',
+    wholesaleMin: 180,
+    wholesaleMax: 220,
+    wholesaleAvg: 200,
+    retailEst: 270,
+    unit: 'kg',
+    previousAvg: 210,
+    changePercent: -4.76,
+    trend: 'down',
+    lastUpdated: 'Today',
+    grade: 'Grade A',
+    arrivalVolumeTonnes: 45,
+  };
+
   const points: PriceHistoryPoint[] = [];
   const now = new Date();
   
-  let currentAvg = veg.wholesaleAvg;
+  let currentAvg = safeVeg.wholesaleAvg || 200;
   
   for (let i = days - 1; i >= 0; i--) {
     const d = new Date(now);
     d.setDate(d.getDate() - i);
     
-    const randomFactor = (Math.sin(i * 1.5 + veg.id.length) * 0.08) + ((Math.cos(i * 0.8) * 0.05));
+    const randomFactor = (Math.sin(i * 1.5 + (safeVeg.id || 'veg').length) * 0.08) + ((Math.cos(i * 0.8) * 0.05));
     let dayAvg = Math.round(currentAvg * (1 + randomFactor));
     if (dayAvg < 40) dayAvg = 40;
     
@@ -779,10 +798,10 @@ export function generateHistoryForVegetable(veg: VegetablePrice, days: number = 
   if (points.length > 0) {
     points[points.length - 1] = {
       date: now.toISOString().split('T')[0],
-      wholesaleMin: veg.wholesaleMin,
-      wholesaleMax: veg.wholesaleMax,
-      wholesaleAvg: veg.wholesaleAvg,
-      retailEst: veg.retailEst,
+      wholesaleMin: safeVeg.wholesaleMin || 180,
+      wholesaleMax: safeVeg.wholesaleMax || 220,
+      wholesaleAvg: safeVeg.wholesaleAvg || 200,
+      retailEst: safeVeg.retailEst || 270,
     };
   }
   

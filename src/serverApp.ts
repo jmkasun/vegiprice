@@ -279,8 +279,24 @@ async function syncLivePricesFromDambullaDec() {
 const app = express();
 app.use(express.json());
 
+// Vercel Serverless Function Path Normalization Middleware
+app.use((req, res, next) => {
+  const url = req.url || '';
+  const xMatchedPath = req.headers['x-matched-path'] as string;
+  
+  if (xMatchedPath && xMatchedPath.length > 1) {
+    const queryIdx = url.indexOf('?');
+    const query = queryIdx !== -1 ? url.substring(queryIdx) : '';
+    req.url = xMatchedPath + query;
+  } else if (url.includes('/index') || url.includes('.ts') || url.includes('.js')) {
+    // Strip function entrypoint filenames from URL path
+    req.url = url.replace(/^\/(api\/)?index(\.ts|\.js)?/, '/api') || '/api';
+  }
+  next();
+});
+
 // 1. Live Daily Prices API
-app.get(['/api/prices/today', '/prices/today'], async (req, res) => {
+app.get(['/api/prices/today', '/prices/today', '*/prices/today', '*/today'], async (req, res) => {
   try {
     const refresh = req.query.refresh === 'true';
     if (refresh) {
@@ -306,7 +322,7 @@ app.get(['/api/prices/today', '/prices/today'], async (req, res) => {
 });
 
 // 2. Vegetable History API
-app.get(['/api/prices/history', '/prices/history'], async (req, res) => {
+app.get(['/api/prices/history', '/prices/history', '*/prices/history', '*/history'], async (req, res) => {
   try {
     const vegId = (req.query.item as string) || 'carrot';
     const days = parseInt((req.query.days as string) || '30', 10);
