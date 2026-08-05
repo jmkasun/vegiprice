@@ -268,112 +268,140 @@ async function syncLivePricesFromDambullaDec() {
 const app = express();
 app.use(express.json());
 
-// Middlewares to trigger sync on cold starts if needed
-app.use(async (req, res, next) => {
-  if (!isSyncedOnce) {
-    try {
-      await syncLivePricesFromDambullaDec();
-    } catch {}
-  }
-  next();
-});
+// Remove blocking middleware for serverless performance
+// Routes handle single-item live fetch on demand with timeout protection
 
 // 1. Live Daily Prices API
 app.get('/api/prices/today', async (req, res) => {
-  const refresh = req.query.refresh === 'true';
-  if (refresh) {
-    await syncLivePricesFromDambullaDec();
-  }
+  try {
+    const refresh = req.query.refresh === 'true';
+    if (refresh) {
+      await syncLivePricesFromDambullaDec();
+    }
 
-  res.json({
-    source: 'Dambulla Dedicated Economic Centre Official API (dambulladec.com)',
-    url: 'https://dambulladec.com/home-dailyprice',
-    lastUpdated: lastUpdatedTime,
-    totalItems: currentVegetables.length,
-    vegetables: currentVegetables,
-  });
+    res.json({
+      source: 'Dambulla Dedicated Economic Centre Official API (dambulladec.com)',
+      url: 'https://dambulladec.com/home-dailyprice',
+      lastUpdated: lastUpdatedTime,
+      totalItems: currentVegetables.length,
+      vegetables: currentVegetables,
+    });
+  } catch (err: any) {
+    res.json({
+      source: 'Dambulla Dedicated Economic Centre Official API (dambulladec.com)',
+      lastUpdated: lastUpdatedTime,
+      totalItems: currentVegetables.length,
+      vegetables: currentVegetables,
+      error: err?.message
+    });
+  }
 });
 
 // 2. Vegetable History API
 app.get('/api/prices/history', async (req, res) => {
-  const vegId = req.query.item as string;
-  const days = parseInt((req.query.days as string) || '30', 10);
+  try {
+    const vegId = (req.query.item as string) || 'carrot';
+    const days = parseInt((req.query.days as string) || '30', 10);
 
-  const found = currentVegetables.find(v => v.id === vegId) || currentVegetables[0];
-  const dambullaId = DAMBULLA_PRODUCT_MAP[found.id] || found.dambullaProductId;
+    const found = currentVegetables.find(v => v.id === vegId) || currentVegetables[0];
+    const dambullaId = DAMBULLA_PRODUCT_MAP[found.id] || found.dambullaProductId;
 
-  let history: PriceHistoryPoint[] = [];
-  let isRealData = false;
+    let history: PriceHistoryPoint[] = [];
+    let isRealData = false;
 
-  if (dambullaId) {
-    try {
-      const response = await fetch(`https://api.dambulladec.com/api/prices/product/${dambullaId}/chart`, {
-        headers: { 'User-Agent': 'DambullaDECPriceTracker/1.0' }
-      });
+    if (dambullaId) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 4000);
 
-      if (response.ok) {
-        const rawData = await response.json();
-        if (Array.isArray(rawData) && rawData.length > 0) {
-          const sorted = [...rawData].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-          const sliced = sorted.slice(-days);
+        const response = await fetch(`https://api.dambulladec.com/api/prices/product/${dambullaId}/chart`, {
+          headers: { 'User-Agent': 'DambullaDECPriceTracker/1.0' },
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
 
-          history = sliced.map(item => {
-            const min = item.min_price || 0;
-            const max = item.max_price || min;
-            const avg = Math.round((min + max) / 2);
-            return {
-              date: item.date,
-              wholesaleMin: min,
-              wholesaleMax: max,
-              wholesaleAvg: avg,
-              retailEst: Math.round(avg * 1.35)
-            };
-          });
+        if (response.ok) {
+          const rawData = await response.json();
+          if (Array.isArray(rawData) && rawData.length > 0) {
+            const sorted = [...rawData].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+            const sliced = sorted.slice(-days);
 
-          isRealData = true;
+            history = sliced.map(item => {
+              const min = Number(item.min_price) || 0;
+              const max = Number(item.max_price) || min;
+              const avg = Math.round((min + max) / 2);
+              return {
+                date: item.date,
+                wholesaleMin: min,
+                wholesaleMax: max,
+                wholesaleAvg: avg,
+                retailEst: Math.round(avg * 1.35)
+              };
+            });
+
+            isRealData = history.length > 0;
+          }
         }
+      } catch (err) {
+        console.error(`Error fetching real Dambulla DEC history for product ${dambullaId}:`, err);
       }
-    } catch (err) {
-      console.error(`Error fetching real Dambulla DEC history for product ${dambullaId}:`, err);
     }
+
+    if (!history || history.length === 0) {
+      history = generateHistoryForVegetable(found, days);
+    }
+
+    const avg30 = Math.round(history.reduce((acc, h) => acc + h.wholesaleAvg, 0) / (history.length || 1));
+    const min30 = Math.min(...history.map(h => h.wholesaleMin));
+    const max30 = Math.max(...history.map(h => h.wholesaleMax));
+
+    const trendText = found.changePercent < -5 
+      ? 'Prices are trending downwards due to high harvest arrivals from Matale & Nuwara Eliya. Expected to remain stable over the next 3 days.'
+      : found.changePercent > 5
+      ? 'Prices rising due to rain-affected transport. Supply expected to normalize later this week.'
+      : 'Price stability maintained with balanced supply & demand at Dambulla DEC.';
+
+    const trendTextSi = found.changePercent < -5 
+      ? 'මාතලේ සහ නුවරඑළිය අස්වැන්න වැඩිවීම නිසා මිල පහළ යමින් පවතී. ඉදිරි දින 3 තුළ මිල ස්ථාවරව පවතිනු ඇතැයි අපේක්ෂා කෙරේ.'
+      : found.changePercent > 5
+      ? 'වැසි සහිත කාලගුණය නිසා ප්‍රවාහන ප්‍රමාදයන් හේතුවෙන් මිල ඉහළ ගොස් ඇත. සති අග වන විට සැපයුම යථා තත්ත්වයට පත්වනු ඇත.'
+      : 'දඹුල්ල ආර්ථික මධ්‍යස්ථානයේ සැපයුම සහ ඉල්ලුම සමතුලිතව පවතින බැවින් මිල ස්ථාවරයි.';
+
+    res.json({
+      vegetable: found,
+      days,
+      history,
+      dataSource: isRealData 
+        ? 'Dambulla Dedicated Economic Centre Official API (https://dambulladec.com)' 
+        : 'Dambulla Market Historical Model',
+      isRealData,
+      stat7DayAvg: Math.round(history.slice(-7).reduce((a, b) => a + b.wholesaleAvg, 0) / Math.min(7, history.length || 1)),
+      stat30DayAvg: avg30,
+      stat30DayMin: min30,
+      stat30DayMax: max30,
+      volatilityRating: Math.abs(found.changePercent) > 15 ? 'High' : Math.abs(found.changePercent) > 5 ? 'Moderate' : 'Low',
+      aiForecast: trendText,
+      aiForecastSi: trendTextSi
+    });
+  } catch (err: any) {
+    console.error('Unhandled history route error:', err);
+    const found = currentVegetables[0];
+    const history = generateHistoryForVegetable(found, 30);
+    res.json({
+      vegetable: found,
+      days: 30,
+      history,
+      dataSource: 'Dambulla Market Historical Model (Fallback)',
+      isRealData: false,
+      stat7DayAvg: 200,
+      stat30DayAvg: 200,
+      stat30DayMin: 150,
+      stat30DayMax: 250,
+      volatilityRating: 'Low',
+      aiForecast: 'Price stability maintained.',
+      aiForecastSi: 'මිල ස්ථාවරව පවතී.'
+    });
   }
-
-  if (!history || history.length === 0) {
-    history = generateHistoryForVegetable(found, days);
-  }
-
-  const avg30 = Math.round(history.reduce((acc, h) => acc + h.wholesaleAvg, 0) / history.length);
-  const min30 = Math.min(...history.map(h => h.wholesaleMin));
-  const max30 = Math.max(...history.map(h => h.wholesaleMax));
-
-  const trendText = found.changePercent < -5 
-    ? 'Prices are trending downwards due to high harvest arrivals from Matale & Nuwara Eliya. Expected to remain stable over the next 3 days.'
-    : found.changePercent > 5
-    ? 'Prices rising due to rain-affected transport. Supply expected to normalize later this week.'
-    : 'Price stability maintained with balanced supply & demand at Dambulla DEC.';
-
-  const trendTextSi = found.changePercent < -5 
-    ? 'මාතලේ සහ නුවරඑළිය අස්වැන්න වැඩිවීම නිසා මිල පහළ යමින් පවතී. ඉදිරි දින 3 තුළ මිල ස්ථාවරව පවතිනු ඇතැයි අපේක්ෂා කෙරේ.'
-    : found.changePercent > 5
-    ? 'වැසි සහිත කාලගුණය නිසා ප්‍රවාහන ප්‍රමාදයන් හේතුවෙන් මිල ඉහළ ගොස් ඇත. සති අග වන විට සැපයුම යථා තත්ත්වයට පත්වනු ඇත.'
-    : 'දඹුල්ල ආර්ථික මධ්‍යස්ථානයේ සැපයුම සහ ඉල්ලුම සමතුලිතව පවතින බැවින් මිල ස්ථාවරයි.';
-
-  res.json({
-    vegetable: found,
-    days,
-    history,
-    dataSource: isRealData 
-      ? 'Dambulla Dedicated Economic Centre Official API (https://dambulladec.com)' 
-      : 'Dambulla Market Historical Model',
-    isRealData,
-    stat7DayAvg: Math.round(history.slice(-7).reduce((a, b) => a + b.wholesaleAvg, 0) / Math.min(7, history.length)),
-    stat30DayAvg: avg30,
-    stat30DayMin: min30,
-    stat30DayMax: max30,
-    volatilityRating: Math.abs(found.changePercent) > 15 ? 'High' : Math.abs(found.changePercent) > 5 ? 'Moderate' : 'Low',
-    aiForecast: trendText,
-    aiForecastSi: trendTextSi
-  });
 });
 
 // 3. FitSMS Gateway Endpoints
@@ -601,6 +629,16 @@ Ensure valid JSON output without extra markdown code block syntax if possible.`;
       buyerTipsSi: [`අද ${topDrop.nameSi} මිලදී ගැනීම වඩාත් වාසිදායක වේ.`]
     });
   }
+});
+
+// Fallback error handler
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error('Express global error:', err);
+  res.status(200).json({
+    error: true,
+    message: err?.message || 'Server error occurred',
+    fallback: true
+  });
 });
 
 export default app;
