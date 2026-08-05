@@ -221,15 +221,12 @@ async function syncLivePricesFromDambullaDec() {
   const entries = Object.entries(DAMBULLA_PRODUCT_MAP);
   let updatedCount = 0;
 
-  // Process in small batches of 6 to prevent serverless socket exhaustion and timeouts
-  const BATCH_SIZE = 6;
-  for (let i = 0; i < entries.length; i += BATCH_SIZE) {
-    const batch = entries.slice(i, i + BATCH_SIZE);
+  try {
     await Promise.all(
-      batch.map(async ([vegId, pId]) => {
+      entries.map(async ([vegId, pId]) => {
         try {
           const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 2000);
+          const timer = setTimeout(() => controller.abort(), 2500);
 
           const response = await fetch(`https://api.dambulladec.com/api/prices/product/${pId}/chart`, {
             headers: { 'User-Agent': 'DambullaDECPriceTracker/1.0' },
@@ -269,10 +266,14 @@ async function syncLivePricesFromDambullaDec() {
             }
           }
         } catch {
-          // Silently preserve existing data on fetch error/timeout
+          // Silently preserve fallback data on error/timeout
         }
       })
     );
+  } catch (err) {
+    console.error('Dambulla DEC sync error:', err);
+  } finally {
+    isSyncing = false;
   }
 
   if (updatedCount > 0) {
@@ -280,12 +281,19 @@ async function syncLivePricesFromDambullaDec() {
     lastSyncTimestamp = Date.now();
     isSyncedOnce = true;
   }
-  isSyncing = false;
   return updatedCount;
 }
 
 const app = express();
 app.use(express.json());
+
+// Normalizing Vercel path rewrites
+app.use((req, res, next) => {
+  if (req.url) {
+    req.url = req.url.replace(/^\/(api\/)?index(\.ts|\.js)?/, '/api');
+  }
+  next();
+});
 
 // 0. Health Check Endpoint
 app.get(['/api/health', '/health'], (req, res) => {
@@ -306,15 +314,14 @@ app.get(['/api/prices/today', '/prices/today'], async (req, res) => {
     const refresh = req.query.refresh === 'true';
     const timeSinceLastSync = Date.now() - lastSyncTimestamp;
 
-    if (refresh) {
-      syncLivePricesFromDambullaDec().catch(() => {});
-    } else if (!isSyncedOnce || timeSinceLastSync > 300000) {
-      // Fire background sync without blocking the HTTP response
-      syncLivePricesFromDambullaDec().catch(() => {});
+    if (refresh || !isSyncedOnce || timeSinceLastSync > 300000) {
+      await syncLivePricesFromDambullaDec();
     }
 
     res.json({
-      source: 'Dambulla Dedicated Economic Centre Official API (dambulladec.com)',
+      source: isSyncedOnce
+        ? 'Dambulla Dedicated Economic Centre Live API (dambulladec.com)'
+        : 'Dambulla Dedicated Economic Centre Market Data',
       url: 'https://dambulladec.com/home-dailyprice',
       lastUpdated: lastUpdatedTime,
       totalItems: currentVegetables.length,
