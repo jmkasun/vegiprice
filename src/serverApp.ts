@@ -217,69 +217,65 @@ let isSyncing = false;
 async function syncLivePricesFromDambullaDec() {
   if (isSyncing) return 0;
   isSyncing = true;
-  
+
   const entries = Object.entries(DAMBULLA_PRODUCT_MAP);
   let updatedCount = 0;
 
-  const globalController = new AbortController();
-  const globalTimer = setTimeout(() => globalController.abort(), 2000);
-
   try {
-    const BATCH_SIZE = 10;
-    for (let i = 0; i < entries.length; i += BATCH_SIZE) {
-      if (globalController.signal.aborted) break;
-      const batch = entries.slice(i, i + BATCH_SIZE);
-      await Promise.all(
-        batch.map(async ([vegId, pId]) => {
-          if (globalController.signal.aborted) return;
-          try {
-            const response = await fetch(`https://api.dambulladec.com/api/prices/product/${pId}/chart`, {
-              headers: { 'User-Agent': 'DambullaDECPriceTracker/1.0' },
-              signal: globalController.signal
-            });
+    // Process top items in parallel with 1200ms timeout per request
+    const batch = entries.slice(0, 16);
+    await Promise.all(
+      batch.map(async ([vegId, pId]) => {
+        const itemController = new AbortController();
+        const itemTimer = setTimeout(() => itemController.abort(), 1200);
 
-            if (response.ok) {
-              const rawData = await response.json();
-              if (Array.isArray(rawData) && rawData.length > 0) {
-                const latest = rawData[rawData.length - 1];
-                const prev = rawData.length > 1 ? rawData[rawData.length - 2] : latest;
+        try {
+          const response = await fetch(`https://api.dambulladec.com/api/prices/product/${pId}/chart`, {
+            headers: { 'User-Agent': 'DambullaDECPriceTracker/1.0' },
+            signal: itemController.signal
+          });
 
-                const idx = currentVegetables.findIndex(v => v.id === vegId);
-                if (idx !== -1) {
-                  const min = Number(latest.min_price) || currentVegetables[idx].wholesaleMin;
-                  const max = Number(latest.max_price) || currentVegetables[idx].wholesaleMax;
-                  const avg = Math.round((min + max) / 2);
+          if (response && response.ok) {
+            const rawData = await response.json().catch(() => null);
+            if (Array.isArray(rawData) && rawData.length > 0) {
+              const latest = rawData[rawData.length - 1];
+              const prev = rawData.length > 1 ? rawData[rawData.length - 2] : latest;
 
-                  const prevAvg = prev ? Math.round(((Number(prev.min_price) || min) + (Number(prev.max_price) || max)) / 2) : avg;
-                  const changePct = prevAvg > 0 ? Number((((avg - prevAvg) / prevAvg) * 100).toFixed(2)) : 0;
+              const idx = currentVegetables.findIndex(v => v.id === vegId);
+              if (idx !== -1) {
+                const min = Number(latest.min_price) || currentVegetables[idx].wholesaleMin;
+                const max = Number(latest.max_price) || currentVegetables[idx].wholesaleMax;
+                const avg = Math.round((min + max) / 2);
 
-                  currentVegetables[idx] = {
-                    ...currentVegetables[idx],
-                    dambullaProductId: pId,
-                    wholesaleMin: min,
-                    wholesaleMax: max,
-                    wholesaleAvg: avg,
-                    retailEst: Math.round(avg * 1.35),
-                    previousAvg: prevAvg,
-                    changePercent: changePct,
-                    trend: changePct > 1 ? 'up' : changePct < -1 ? 'down' : 'stable',
-                    lastUpdated: `Live from Dambulla DEC (${latest.date})`
-                  };
-                  updatedCount++;
-                }
+                const prevAvg = prev ? Math.round(((Number(prev.min_price) || min) + (Number(prev.max_price) || max)) / 2) : avg;
+                const changePct = prevAvg > 0 ? Number((((avg - prevAvg) / prevAvg) * 100).toFixed(2)) : 0;
+
+                currentVegetables[idx] = {
+                  ...currentVegetables[idx],
+                  dambullaProductId: pId,
+                  wholesaleMin: min,
+                  wholesaleMax: max,
+                  wholesaleAvg: avg,
+                  retailEst: Math.round(avg * 1.35),
+                  previousAvg: prevAvg,
+                  changePercent: changePct,
+                  trend: changePct > 1 ? 'up' : changePct < -1 ? 'down' : 'stable',
+                  lastUpdated: `Live from Dambulla DEC (${latest.date})`
+                };
+                updatedCount++;
               }
             }
-          } catch {
-            // Silently preserve existing data on error/timeout/abort
           }
-        })
-      );
-    }
+        } catch {
+          // Silently preserve existing fallback data on error/timeout
+        } finally {
+          clearTimeout(itemTimer);
+        }
+      })
+    );
   } catch (err) {
-    // Ignore global abort/cancellation errors
+    console.error('Dambulla DEC live sync error:', err);
   } finally {
-    clearTimeout(globalTimer);
-    globalController.abort(); // Cancel any remaining in-flight HTTP sockets
     isSyncing = false;
   }
 
@@ -314,10 +310,13 @@ app.get(['/api/prices/today', '/prices/today', '*/prices/today'], async (req, re
     const timeSinceLastSync = Date.now() - lastSyncTimestamp;
 
     if (refresh || !isSyncedOnce || timeSinceLastSync > 300000) {
-      await syncLivePricesFromDambullaDec();
+      // Race sync against a 1400ms hard budget so Vercel function response never times out or crashes
+      const syncTask = syncLivePricesFromDambullaDec();
+      const timeoutTask = new Promise(resolve => setTimeout(resolve, 1400));
+      await Promise.race([syncTask, timeoutTask]);
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       source: isSyncedOnce
         ? 'Dambulla Dedicated Economic Centre Live API (dambulladec.com)'
         : 'Dambulla Dedicated Economic Centre Market Data',
@@ -327,13 +326,13 @@ app.get(['/api/prices/today', '/prices/today', '*/prices/today'], async (req, re
       vegetables: currentVegetables,
     });
   } catch (err: any) {
-    res.status(200).json({
+    console.error('Error serving /api/prices/today:', err);
+    return res.status(200).json({
       source: 'Dambulla Dedicated Economic Centre Market Data',
       url: 'https://dambulladec.com/home-dailyprice',
       lastUpdated: lastUpdatedTime,
       totalItems: currentVegetables.length,
       vegetables: currentVegetables,
-      error: err?.message
     });
   }
 });
