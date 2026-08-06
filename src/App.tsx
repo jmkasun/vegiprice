@@ -31,7 +31,12 @@ export default function App() {
   const fetchLivePrices = (manualRefresh: boolean = false) => {
     setIsRefreshing(true);
     fetch(`/api/prices/today${manualRefresh ? '?refresh=true' : ''}`)
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`Server returned status ${res.status}`);
+        }
+        return res.json();
+      })
       .then((data) => {
         if (data && data.vegetables) {
           setVegetables(data.vegetables);
