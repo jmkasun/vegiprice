@@ -290,6 +290,18 @@ async function syncLivePricesFromDambullaDec() {
 const app = express();
 app.use(express.json());
 
+// Express middleware for Vercel route normalization
+app.use((req, res, next) => {
+  if (req.url) {
+    // Strip redundant Vercel prefixes
+    req.url = req.url.replace(/^\/(api\/)?index(\.ts|\.js)?/, '/api');
+    if (req.url === '/api/' || req.url === '/api') {
+      req.url = '/api/prices/today';
+    }
+  }
+  next();
+});
+
 // 0. Health Check Endpoint
 app.get(['/api/health', '/health'], (req, res) => {
   res.status(200).json({
@@ -304,16 +316,16 @@ app.get(['/api/health', '/health'], (req, res) => {
 });
 
 // 1. Live Daily Prices API
-app.get(['/api/prices/today', '/prices/today', '*/prices/today'], async (req, res) => {
+app.get(['/api/prices/today', '/prices/today', '*/prices/today', '*today'], (req, res) => {
   try {
     const refresh = req.query.refresh === 'true';
     const timeSinceLastSync = Date.now() - lastSyncTimestamp;
 
+    // Trigger sync asynchronously in background without blocking serverless function response
     if (refresh || !isSyncedOnce || timeSinceLastSync > 300000) {
-      // Race sync against a 1400ms hard budget so Vercel function response never times out or crashes
-      const syncTask = syncLivePricesFromDambullaDec();
-      const timeoutTask = new Promise(resolve => setTimeout(resolve, 1400));
-      await Promise.race([syncTask, timeoutTask]);
+      syncLivePricesFromDambullaDec().catch((err) => {
+        console.warn('Background Dambulla DEC sync error:', err);
+      });
     }
 
     return res.status(200).json({

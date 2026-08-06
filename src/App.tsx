@@ -38,7 +38,7 @@ export default function App() {
         return res.json();
       })
       .then((data) => {
-        if (data && data.vegetables) {
+        if (data && Array.isArray(data.vegetables) && data.vegetables.length > 0) {
           setVegetables(data.vegetables);
           if (data.lastUpdated) {
             setLastUpdated(
@@ -48,11 +48,15 @@ export default function App() {
               })
             );
           }
+        } else {
+          setVegetables(INITIAL_VEGETABLES);
         }
-        setIsRefreshing(false);
       })
       .catch((err) => {
-        console.error('Error fetching daily prices:', err);
+        console.warn('Error fetching daily prices from API, using built-in market data fallback:', err);
+        setVegetables(INITIAL_VEGETABLES);
+      })
+      .finally(() => {
         setIsRefreshing(false);
       });
   };
