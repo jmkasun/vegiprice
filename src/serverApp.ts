@@ -221,22 +221,22 @@ async function syncLivePricesFromDambullaDec() {
   const entries = Object.entries(DAMBULLA_PRODUCT_MAP);
   let updatedCount = 0;
 
-  const syncTask = (async () => {
-    // Process in small batches of 8 to prevent socket/connection exhaustion on Vercel
-    const BATCH_SIZE = 8;
+  const globalController = new AbortController();
+  const globalTimer = setTimeout(() => globalController.abort(), 2000);
+
+  try {
+    const BATCH_SIZE = 10;
     for (let i = 0; i < entries.length; i += BATCH_SIZE) {
+      if (globalController.signal.aborted) break;
       const batch = entries.slice(i, i + BATCH_SIZE);
       await Promise.all(
         batch.map(async ([vegId, pId]) => {
+          if (globalController.signal.aborted) return;
           try {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 1800);
-
             const response = await fetch(`https://api.dambulladec.com/api/prices/product/${pId}/chart`, {
               headers: { 'User-Agent': 'DambullaDECPriceTracker/1.0' },
-              signal: controller.signal
+              signal: globalController.signal
             });
-            clearTimeout(timer);
 
             if (response.ok) {
               const rawData = await response.json();
@@ -270,21 +270,16 @@ async function syncLivePricesFromDambullaDec() {
               }
             }
           } catch {
-            // Silently preserve existing data on error/timeout
+            // Silently preserve existing data on error/timeout/abort
           }
         })
       );
     }
-  })();
-
-  // Enforce a strict max time budget of 2200ms total for serverless function compliance
-  const timeoutTask = new Promise<void>((resolve) => setTimeout(resolve, 2200));
-
-  try {
-    await Promise.race([syncTask, timeoutTask]);
   } catch (err) {
-    console.error('Dambulla DEC sync error:', err);
+    // Ignore global abort/cancellation errors
   } finally {
+    clearTimeout(globalTimer);
+    globalController.abort(); // Cancel any remaining in-flight HTTP sockets
     isSyncing = false;
   }
 
