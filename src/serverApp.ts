@@ -287,14 +287,6 @@ async function syncLivePricesFromDambullaDec() {
 const app = express();
 app.use(express.json());
 
-// Normalizing Vercel path rewrites
-app.use((req, res, next) => {
-  if (req.url) {
-    req.url = req.url.replace(/^\/(api\/)?index(\.ts|\.js)?/, '/api');
-  }
-  next();
-});
-
 // 0. Health Check Endpoint
 app.get(['/api/health', '/health'], (req, res) => {
   res.json({
@@ -304,7 +296,7 @@ app.get(['/api/health', '/health'], (req, res) => {
     uptime: process.uptime(),
     isSynced: isSyncedOnce,
     totalVegetables: currentVegetables.length,
-    environment: process.env.VERCEL ? 'vercel' : 'node',
+    environment: 'node',
   });
 });
 

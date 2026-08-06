@@ -1,6 +1,6 @@
 import React from 'react';
 import { Language } from '../types';
-import { RefreshCw, Bell, LineChart, TrendingDown, Sparkles, Calculator, Landmark, Globe, Settings } from 'lucide-react';
+import { RefreshCw, Bell, LineChart, TrendingDown, Sparkles, Calculator, Landmark, Globe, Settings, FileDown } from 'lucide-react';
 
 interface HeaderProps {
   language: Language;
@@ -12,6 +12,8 @@ interface HeaderProps {
   onRefresh: () => void;
   activeSmsCount: number;
   onOpenSettings?: () => void;
+  onExportPdf?: () => void;
+  isExportingPdf?: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -24,6 +26,8 @@ export const Header: React.FC<HeaderProps> = ({
   onRefresh,
   activeSmsCount,
   onOpenSettings,
+  onExportPdf,
+  isExportingPdf = false,
 }) => {
   return (
     <header className="bg-emerald-900 text-white border-b border-emerald-800 shadow-md sticky top-0 z-40">
@@ -53,8 +57,19 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          {/* Mobile Refresh & Settings Buttons */}
+          {/* Mobile Refresh, Export PDF & Settings Buttons */}
           <div className="flex items-center gap-2 md:hidden">
+            {onExportPdf && (
+              <button
+                id="header-mobile-export-pdf"
+                onClick={onExportPdf}
+                disabled={isExportingPdf}
+                className="p-2 rounded-lg bg-emerald-800 hover:bg-emerald-700 text-amber-300 transition-colors"
+                title={language === 'si' ? 'PDF වාර්තාව බාගන්න' : 'Export PDF Report'}
+              >
+                <FileDown className={`w-5 h-5 ${isExportingPdf ? 'animate-bounce text-amber-400' : ''}`} />
+              </button>
+            )}
             {onOpenSettings && (
               <button
                 onClick={onOpenSettings}
@@ -75,8 +90,22 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
-        {/* Right side controls: Settings, Refresh, Language Switch */}
+        {/* Right side controls: Export PDF, Settings, Refresh, Language Switch */}
         <div className="flex items-center gap-3 w-full md:w-auto justify-end">
+          
+          {/* PDF Export Button */}
+          {onExportPdf && (
+            <button
+              id="header-desktop-export-pdf"
+              onClick={onExportPdf}
+              disabled={isExportingPdf}
+              className="px-3.5 py-1.5 rounded-lg bg-emerald-800/90 hover:bg-emerald-700 border border-emerald-600/60 text-emerald-100 hover:text-white font-semibold text-xs shadow-xs transition-all flex items-center gap-1.5"
+              title={language === 'si' ? 'වත්මන් දර්ශනයේ PDF වාර්තාව බාගන්න' : 'Export PDF of Current View'}
+            >
+              <FileDown className={`w-4 h-4 text-amber-300 ${isExportingPdf ? 'animate-bounce' : ''}`} />
+              <span>{isExportingPdf ? (language === 'si' ? 'PDF සකසමින්...' : 'Exporting...') : (language === 'si' ? 'PDF ලබාගන්න' : 'Export PDF')}</span>
+            </button>
+          )}
           
           {/* SMS Gateway Settings Button */}
           {onOpenSettings && (
